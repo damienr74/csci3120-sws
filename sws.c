@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "network.h"
+#include "scheduler.h"
 
 #define MAX_HTTP_SIZE 8192 /* size of buffer to allocate */
 
@@ -84,6 +85,12 @@ static void serve_client( int fd ) {
 	close( fd ); /* close client connectuin*/
 }
 
+void usage( void ) {
+	printf( "usage: sws <port> <scheduler>\n" );
+	printf( "   port: [SJF|RR|MLQF]\n" );
+	exit(EXIT_FAILURE);
+}
+
 
 /* This function is where the program starts running.
  *    The function first parses its command line parameters to determine port #
@@ -100,17 +107,27 @@ int main( int argc, char **argv ) {
 	int fd; /* client file descriptor */
 
 	/* check for and process parameters */
-	if( ( argc < 2 ) || ( sscanf( argv[1], "%d", &port ) < 1 ) ) {
-		printf( "usage: sms <port>\n" );
-		return 0;
+	if( argc < 3 ) {
+		printf( "incorrect number of parameters\n" );
+		usage();
+	}
+
+	if ( sscanf( argv[1], "%d", &port ) < 1 ) {
+		printf( "port must be numerical\n" );
+		usage();
 	}
 
 	network_init( port ); /* init network module */
+
+	scheduler_init( argv[2] );
+
+	/* start scheduler thread(s) ? */
 
 	for( ;; ) { /* main loop */
 		network_wait(); /* wait for clients */
 
 		for( fd = network_open(); fd >= 0; fd = network_open() ) { /* get clients */
+			/* TODO feed requests to scheduler */
 			serve_client( fd ); /* process each client */
 		}
 	}

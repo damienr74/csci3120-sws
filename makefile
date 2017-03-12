@@ -2,7 +2,7 @@
 PROGRAM = sws
 HEADERS = network.h
 OBJS = network.o sws.o
-ADD_OBJS = 
+ADD_OBJS = scheduler.o
 
 # compilers, linkers, utilities, and flags
 CC = gcc
