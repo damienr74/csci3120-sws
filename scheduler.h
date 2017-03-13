@@ -2,8 +2,9 @@
 #define SCHEDULER_H
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <pthread.h>
 
 enum {
 	NUM_RCBS = 100,
@@ -11,6 +12,7 @@ enum {
 
 /* used for rcb.status */
 enum {
+	RCB_INIT,
 	RCB_WAIT,
 	RCB_BUSY,
 	RCB_DONE,
@@ -31,8 +33,9 @@ struct interface {
  */
 struct rcb {
 	const struct interface *interface; /* inherit attributes */
-	int seq_num;
+	long long seq_num;
 	int fd;
+	char *request;
 	FILE *file;
 	long long snt_bytes;
 	long long tot_bytes;
@@ -45,10 +48,13 @@ struct rcb {
 struct scheduler {
 	struct interface *interface; /* inherit attributes */
 	int ( *compare )( const struct rcb *rcb1, const struct rcb *rcb2 );
+	void ( *serve )( struct rcb *request );
 	struct rcb **rcbs;
-	int count;
+	int rcb_count;
 	int capacity;
 	int quantum;
+	pthread_t *threads;
+	int thrd_count;
 };
 
 /* scheduler component static dispatch blocks */
@@ -58,6 +64,7 @@ extern const void *Sjf_scheduler;
 /**
  * Picks a scheduler on startup to manage the threadpool.
  */
-void scheduler_init( char *sched );
+void scheduler_init( char *sched, int thread_count );
+void scheduler_insert( int fd );
 
 #endif
