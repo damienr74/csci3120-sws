@@ -33,6 +33,7 @@ struct interface {
  */
 struct rcb {
 	const struct interface *interface; /* inherit attributes */
+	struct rcb *next;
 	long long seq_num;
 	int fd;
 	char *request;
@@ -48,6 +49,8 @@ struct rcb {
 struct scheduler {
 	struct interface *interface; /* inherit attributes */
 	int ( *compare )( const struct rcb *rcb1, const struct rcb *rcb2 );
+	void ( *insert )( struct rcb *request );
+	struct rcb *( *remove )( void );
 	void ( *serve )( struct rcb *request );
 	struct rcb **rcbs;
 	int rcb_count;

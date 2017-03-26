@@ -14,7 +14,7 @@
 #include <stdlib.h>
 
 void usage( void ) {
-	printf( "usage: sws <port> <scheduler>\n" );
+	printf( "usage: sws <port> <scheduler> <thread_count>\n" );
 	printf( "   port: [SJF|RR|MLQF]\n" );
 	exit(EXIT_FAILURE);
 }
@@ -35,7 +35,7 @@ int main( int argc, char **argv ) {
 	int fd; /* client file descriptor */
 
 	/* check for and process parameters */
-	if( argc < 3 ) {
+	if( argc < 4 ) {
 		printf( "incorrect number of parameters\n" );
 		usage();
 	}
@@ -47,13 +47,13 @@ int main( int argc, char **argv ) {
 
 	network_init( port ); /* init network module */
 
-	scheduler_init( argv[2], 1 );
+	long thread_count = strtol(argv[3], NULL, 10);
+	scheduler_init( argv[2], thread_count);
 
 	for( ;; ) { /* main loop */
 		network_wait(); /* wait for clients */
 
 		for( fd = network_open(); fd >= 0; fd = network_open() ) { /* get clients */
-			/* TODO feed requests to scheduler */
 			scheduler_insert( fd ); /* process each client */
 		}
 	}

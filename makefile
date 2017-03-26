@@ -6,9 +6,9 @@ ADD_OBJS = scheduler.o
 
 # compilers, linkers, utilities, and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -g
+CFLAGS = -Wall -Wextra -pedantic
 COMPILE = $(CC) $(CFLAGS)
-LINK = $(CC) $(CFLAGS) -o $@ 
+LINK = $(CC) $(CFLAGS) -o $@
 
 # implicit rule to build .o from .c files
 %.o: %.c $(HEADERS)
@@ -25,7 +25,7 @@ lib: sws_gold.o
 	 ar -r libxsws.a sws_gold.o
 
 clean:
-	rm -f *.o $(PROGRAM) 
+	rm -f *.o $(PROGRAM)
 
 zip:
 	rm -f sws.zip

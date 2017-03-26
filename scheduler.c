@@ -35,6 +35,7 @@ void *scheduler_run(void *arg);
 static struct scheduler *sched = NULL;
 static long long seq_num = 1;
 static pthread_mutex_t request_mutex;
+static pthread_cond_t cond;
 
 void scheduler_init( char *name, int thrd_count ) {
 	if ( !name || thrd_count < 1 )
@@ -47,10 +48,11 @@ void scheduler_init( char *name, int thrd_count ) {
 			abort();
 		}
 
+		sleep(15);
 		pthread_mutex_init(&request_mutex, NULL);
-		for (int i = 0; i < sched->thrd_count; i++) {
+		pthread_cond_init(&cond, NULL);
+		for (int i = 0; i < sched->thrd_count; i++)
 			pthread_create(&sched->threads[i], NULL, &scheduler_run, NULL);
-		}
 
 	} else if ( !strcmp( "RR", name ) ) {
 		// init Round Robin
@@ -64,7 +66,7 @@ void scheduler_init( char *name, int thrd_count ) {
 
 void scheduler_insert( int fd ) {
 	static char *buffer;
-	char *req;
+	char *req = NULL;
 	char *brk;
 	char *tmp;
 	int len;
@@ -101,91 +103,35 @@ void scheduler_insert( int fd ) {
 		return;
 	}
 
-	pthread_mutex_lock(&request_mutex);
-	if ( sched->rcb_count >= sched->capacity ) {
-		void *p = realloc(sched->rcbs,
-				sizeof(void *) * sched->capacity * 2);
-		if (!p) {
-			perror( "Cannot process request" );
-			return;
-		}
-
-		sched->rcbs = p;
-		sched->capacity *= 2;
-	}
-
-	struct rcb *value = new(Rcb, seq_num++, fd, req, buf.st_size);
-	if (!value)
+	struct rcb *request = new(Rcb, seq_num++, fd, req, buf.st_size);
+	if (!request)
 		return;
 
-	int index = sched->rcb_count++;
-	int parent;
 
-	while ( index > 0 ) {
-		parent = (index - 1) >> 1;
-		if (sched->compare(sched->rcbs[parent], value) < 0) {
-			break;
-		} else {
-			sched->rcbs[index] = sched->rcbs[parent];
-			index = parent;
-		}
-	}
+	pthread_mutex_lock(&request_mutex);
 
-	sched->rcbs[index] = value;
+	sched->insert(request);
+
+	pthread_cond_signal(&cond);
 	pthread_mutex_unlock(&request_mutex);
 }
 
 struct rcb *scheduler_next( void ) {
-	struct rcb *value;
-	int index, next_index, lchild, rchild;
-
-	if ( sched->rcb_count == 0 )
-		return NULL;
-
 	pthread_mutex_lock(&request_mutex);
-	value = sched->rcbs[0];
+	while (sched->rcb_count < 1)
+		pthread_cond_wait(&cond, &request_mutex);
 
-	struct rcb *new_top = sched->rcbs[--sched->rcb_count];
-
-	index = 0;
-	int (*cmp)(const struct rcb *rcb1, const struct rcb *rcb2) = sched->compare;
-
-	while (1) {
-		lchild = (index << 1) + 1;
-		rchild = (index << 1) + 2;
-
-		if (lchild < sched->rcb_count && cmp(sched->rcbs[lchild], new_top) < 0) {
-			if (rchild < sched->rcb_count &&
-				cmp(sched->rcbs[lchild], sched->rcbs[rchild]) < 0) {
-				next_index = lchild;
-			} else {
-				next_index = rchild;
-			}
-		} else if (rchild < sched->rcb_count && cmp(sched->rcbs[rchild], new_top) < 0) {
-			next_index = rchild;
-		} else {
-			sched->rcbs[index] = new_top;
-			break;
-		}
-
-		sched->rcbs[index] = sched->rcbs[next_index];
-		index = next_index;
-	}
-
+	struct rcb *request = sched->remove();
 	pthread_mutex_unlock(&request_mutex);
-	return value;
+	return request;
 }
 
 void *scheduler_run(void *arg) {
 	struct rcb *request;
 
-	/* look into pthread_cond_wait to eliminate busy wait */
 	for (request = scheduler_next();; request = scheduler_next()) {
-		if (!request) {
-			continue;
-		}
-
-		sched->serve(request);
+		if (request)
+			sched->serve(request);
 	}
 
 	return arg;
@@ -233,7 +179,7 @@ static void *rcb_new( void *_this, va_list *args ) {
 	this->tot_bytes = va_arg( *args, off_t );
 
 	this->request = malloc( strlen(filename) + 1 );
-	sprintf(this->request, filename);
+	sprintf(this->request, "%s", filename);
 
 	this->file = NULL;
 	this->snt_bytes = 0;
@@ -270,6 +216,73 @@ static int sjf_compare( const struct rcb *rcb1, const struct rcb *rcb2 ) {
 		return 0;
 
 	return 1;
+}
+
+static void sjf_insert(struct rcb *request) {
+	if ( sched->rcb_count >= sched->capacity ) {
+		void *p = realloc(sched->rcbs,
+				sizeof(void *) * sched->capacity * 2);
+		if (!p) {
+			perror( "Too many requests, out of memory" );
+			return;
+		}
+
+		sched->rcbs = p;
+		sched->capacity *= 2;
+	}
+
+	int parent;
+	int index = sched->rcb_count++;
+
+	while ( index > 0 ) {
+		parent = (index - 1) >> 1;
+		if (sched->compare(sched->rcbs[parent], request) < 0) {
+			break;
+		} else {
+			sched->rcbs[index] = sched->rcbs[parent];
+			index = parent;
+		}
+	}
+
+	sched->rcbs[index] = request;
+}
+
+static struct rcb *sjf_remove( void ) {
+	struct rcb *request;
+	int index, next_index, lchild, rchild;
+
+	request = sched->rcbs[0];
+	struct rcb *new_top = sched->rcbs[--sched->rcb_count];
+
+	index = 0;
+	int (*cmp)(const struct rcb *rcb1, const struct rcb *rcb2) = sched->compare;
+
+	while (1) {
+		lchild = (index << 1) + 1;
+		rchild = (index << 1) + 2;
+
+		if (lchild < sched->rcb_count &&
+				cmp(sched->rcbs[lchild], new_top) < 0) {
+			if (rchild < sched->rcb_count &&
+				cmp(sched->rcbs[lchild],
+					sched->rcbs[rchild]) < 0) {
+				next_index = lchild;
+			} else {
+				next_index = rchild;
+			}
+		} else if (rchild < sched->rcb_count &&
+				cmp(sched->rcbs[rchild], new_top) < 0) {
+			next_index = rchild;
+		} else {
+			sched->rcbs[index] = new_top;
+			break;
+		}
+
+		sched->rcbs[index] = sched->rcbs[next_index];
+		index = next_index;
+	}
+
+	return request;
 }
 
 static void sjf_serve( struct rcb *request ) {
@@ -318,20 +331,23 @@ stop_sjf_serve:
 	delete(request);
 }
 
-
 static void *sjf_new( void *_this, va_list *args ) {
 	struct scheduler *this = _this;
 
 	this->compare = sjf_compare;
+	this->insert = sjf_insert;
+	this->remove = sjf_remove;
 	this->serve = sjf_serve;
+
 	this->rcbs = calloc( NUM_RCBS, sizeof( void * ) );
+
 	for (int i = 0; i < NUM_RCBS; i++)
 		this->rcbs[i] = NULL;
 
 	this->rcb_count = 0;
 	this->capacity = NUM_RCBS;
 	this->quantum = -1;
-	this->thrd_count = va_arg( args, int );
+	this->thrd_count = va_arg( *args, int );
 	this->threads = calloc(this->thrd_count, sizeof *this->threads);
 
 	return this;
