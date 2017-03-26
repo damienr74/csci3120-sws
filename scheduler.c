@@ -7,10 +7,10 @@
  * The enqueueing and dequeueing mechanisms are scheduler agnostic, every
  * scheduler only has to implement the following dynamic dispatch methods:
  *   - name_cmp, which tells the scheduler_insert and scheduler_next how to
- *     prioritize the requests.
+ *	 prioritize the requests.
  *   - name_new, allocate and init the data for the scheduler
  *   - name_delete, deallocat any allocated data and deconstruct the current
- *     scheduler
+ *	 scheduler
  *
  * Code has been tested, SJF in working condition.
  *
@@ -36,6 +36,7 @@ static struct scheduler *sched = NULL;
 static long long seq_num = 1;
 static pthread_mutex_t request_mutex;
 static pthread_cond_t cond;
+static char *buffer;
 
 void scheduler_init( char *name, int thrd_count ) {
 	if ( !name || thrd_count < 1 )
@@ -43,23 +44,29 @@ void scheduler_init( char *name, int thrd_count ) {
 
 	if ( !strcmp( "SJF", name ) ) {
 		// init Shortest Job First
-		if ( !(sched = new(Sjf_scheduler, thrd_count)) ) {
+		if ( !(sched = new(Sjf_scheduler)) ) {
 			perror( "Could not init SJF scheduler" );
 			abort();
 		}
-
-		sleep(15);
-		pthread_mutex_init(&request_mutex, NULL);
-		pthread_cond_init(&cond, NULL);
-		for (int i = 0; i < sched->thrd_count; i++)
-			pthread_create(&sched->threads[i], NULL, &scheduler_run, NULL);
-
 	} else if ( !strcmp( "RR", name ) ) {
 		// init Round Robin
+		if ( !(sched = new(Rr_scheduler)) ) {
+			perror( "Could not init SJF scheduler" );
+			abort();
+		}
 	} else if ( !strcmp( "MLQF", name ) ) {
 		// init Multi-Level Queue with Feedback
 	} else {
 		perror( "Scheduler not recognized" );
+		abort();
+	}
+
+	//sleep(15); //****
+	pthread_mutex_init(&request_mutex, NULL);
+	pthread_cond_init(&cond, NULL);
+	pthread_t scheduler;
+	if (pthread_create(&scheduler, NULL, &scheduler_run, NULL)) {
+		perror( "Could not start scheduler thread" );
 		abort();
 	}
 }
@@ -128,10 +135,27 @@ struct rcb *scheduler_next( void ) {
 
 void *scheduler_run(void *arg) {
 	struct rcb *request;
+	int len;
+	if (!buffer) {
+		buffer = calloc(MAX_HTTP_SIZE, sizeof *buffer);
+		if (!buffer) {
+			perror( "Error allocating memory" );
+			abort();
+		}
+	}
 
 	for (request = scheduler_next();; request = scheduler_next()) {
-		if (request)
+		if (request) {
+			if (!request->file) {
+				len = sprintf( buffer, "HTTP/1.1 404 File not found\n\n" );
+				write( request->fd, buffer, len );
+			} else {
+				len = sprintf(buffer, "HTTP/1.1 200 OK\n\n");
+				write( request->fd, buffer, len );
+			}
+
 			sched->serve(request);
+		}
 	}
 
 	return arg;
@@ -167,7 +191,7 @@ static void delete( void *this ) {
 
 
 /*****************************************************************************
- *            Request Control Block static methods & Implementation
+ *			Request Control Block static methods & Implementation
  ****************************************************************************/
 
 static void *rcb_new( void *_this, va_list *args ) {
@@ -180,10 +204,11 @@ static void *rcb_new( void *_this, va_list *args ) {
 
 	this->request = malloc( strlen(filename) + 1 );
 	sprintf(this->request, "%s", filename);
+	this->file = fopen(this->request, "rb");  //**** rb?
 
-	this->file = NULL;
 	this->snt_bytes = 0;
 	this->status = RCB_INIT;
+	this->next = NULL;
 
 	return this;
 }
@@ -206,7 +231,7 @@ const void *Rcb = &_rcb;
 
 
 /*****************************************************************************
- *            SJF Scheduler static methods & Implementation
+ *			SJF Scheduler static methods & Implementation
  ****************************************************************************/
 
 static int sjf_compare( const struct rcb *rcb1, const struct rcb *rcb2 ) {
@@ -286,28 +311,8 @@ static struct rcb *sjf_remove( void ) {
 }
 
 static void sjf_serve( struct rcb *request ) {
-	static char *buffer;
-	int len;
-
-	if (!buffer) {
-		buffer = calloc(MAX_HTTP_SIZE, sizeof *buffer);
-		if (!buffer) {
-			perror( "Error allocating memory" );
-			abort();
-		}
-	}
-
-	request->file = fopen(request->request, "r");
-	if (!request->file) {
-		len = sprintf( buffer, "HTTP/1.1 404 File not found\n\n" );
-		write( request->fd, buffer, len );
-	} else {
-		len = sprintf(buffer, "HTTP/1.1 200 OK\n\n");
-		write( request->fd, buffer, len );
-	}
-
 	do {
-		len = fread(buffer, 1, MAX_HTTP_SIZE, request->file);
+		int len = fread(buffer, 1, MAX_HTTP_SIZE, request->file);
 		if ( len < 0 ) {
 			perror( "Error while reading file" );
 			goto stop_sjf_serve;
@@ -347,8 +352,6 @@ static void *sjf_new( void *_this, va_list *args ) {
 	this->rcb_count = 0;
 	this->capacity = NUM_RCBS;
 	this->quantum = -1;
-	this->thrd_count = va_arg( *args, int );
-	this->threads = calloc(this->thrd_count, sizeof *this->threads);
 
 	return this;
 }
@@ -374,15 +377,112 @@ const void *Sjf_scheduler = &_sjf_scheduler;
 
 
 /*****************************************************************************
- *            TODO RR Scheduler static methods & Implementation
+ *           TODO RR Scheduler static methods & Implementation
  *
- * need to implement mlqf_compare, mlqf_new, mlqf_delete, and setup the dynamic
+ * need to implement rr_new, rr_delete, and setup the dynamic
  * dispatch methods
  ****************************************************************************/
 
+static void rr_insert(struct rcb *request)
+{
+	if (!sched->rcbs[1]) {
+		sched->rcbs[0] = sched->rcbs[1] = request;
+	} else {
+		sched->rcbs[1]->next = request;
+		sched->rcbs[1] = sched->rcbs[1]->next;
+	}
+
+	sched->rcb_count++;
+}
+
+static struct rcb *rr_remove(void)
+{
+	struct rcb *request = sched->rcbs[0];
+	if (request == sched->rcbs[1]) {
+		sched->rcbs[0] = sched->rcbs[1] = NULL;
+	} else {
+		sched->rcbs[0] = request->next;
+	}
+	sched->rcb_count--;
+	request->next = NULL;
+
+	return request;
+}
+
+static void rr_serve(struct rcb *request)
+{
+	int len = fread(buffer, 1, MAX_HTTP_SIZE, request->file);
+	if ( len < 0 ) {
+		perror( "Error while reading file" );
+		fflush(stderr);
+		delete(request);
+		return;
+	}
+
+	request->snt_bytes += len;
+	if (len > 0)
+		len = write( request->fd, buffer, len );
+
+	if ( len < 0 ) {
+		perror( "Error while writing to client" );
+		fflush(stderr);
+		delete(request);
+		return;
+	}
+
+	if (request->snt_bytes < request->tot_bytes) {
+		sched->insert(request);
+	} else {
+		printf("Request <%lld> completed\n", request->seq_num);
+		delete(request);
+	}
+
+	fflush(stdout);
+}
+
+void *rr_new(void *_this, va_list *args)
+{
+	struct scheduler *this = _this;
+
+	this->insert = rr_insert;
+	this->remove = rr_remove;
+	this->serve = rr_serve;
+
+	this->rcbs = calloc(2, sizeof *this->rcbs);
+	this->quantum = MAX_HTTP_SIZE;
+
+	return this;
+}
+
+void *rr_delete(void *_this)
+{
+	struct scheduler *this = _this;
+
+	if (this->rcbs[0]) {
+		struct rcb *request;
+		while (this->rcbs[0]) {
+			request = this->rcbs[0]->next;
+			delete(this->rcbs[0]);
+			this->rcbs[0] = request;
+		}
+	}
+
+	free(this->rcbs);
+
+	return this;
+}
+
+
+static const struct interface _Rr_scheduler = {
+	sizeof (struct scheduler),
+	rr_new,
+	rr_delete,
+};
+
+const void *Rr_scheduler = &_Rr_scheduler;
 
 /*****************************************************************************
- *            TODO MLQF Scheduler static methods & Implementation
+ *		TODO MLQF Scheduler static methods & Implementation
  *
  * need to implement mlqf_compare, mlqf_new, mlqf_delete, and setup the dynamic
  * dispatch methods

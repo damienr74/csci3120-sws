@@ -56,13 +56,12 @@ struct scheduler {
 	int rcb_count;
 	int capacity;
 	int quantum;
-	pthread_t *threads;
-	int thrd_count;
 };
 
 /* scheduler component static dispatch blocks */
 extern const void *Rcb;
 extern const void *Sjf_scheduler;
+extern const void *Rr_scheduler;
 
 /**
  * Picks a scheduler on startup to manage the threadpool.
