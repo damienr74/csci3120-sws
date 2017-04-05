@@ -2,20 +2,22 @@
  * Author: Damien
  *
  * Description: this file holds the scheduler specific methods to init,
- * enqueue, dequeue, and memory manage the incomming requests.
+ * enqueue, dequeue, and memory manage the incoming requests.
  *
  * The enqueueing and dequeueing mechanisms are scheduler agnostic, every
  * scheduler only has to implement the following dynamic dispatch methods:
  *   - name_cmp, which tells the scheduler_insert and scheduler_next how to
  *	 prioritize the requests.
  *   - name_new, allocate and init the data for the scheduler
- *   - name_delete, deallocat any allocated data and deconstruct the current
+ *   - name_delete, deallocate any allocated data and deconstruct the current
  *	 scheduler
  *
  * Code has been tested, SJF in working condition.
  *
  * TODO change data structure lock to cond_wait instead of mutex
  */
+
+#define _POSIX_C_SOURCE 9
 
 #include "scheduler.h"
 #include <stdlib.h>
@@ -54,10 +56,14 @@ void scheduler_init( char *name, int thrd_count ) {
 			perror( "Could not init SJF scheduler" );
 			abort();
 		}
-	} else if ( !strcmp( "MLQF", name ) ) {
+	} else if (!strcmp("MLQF", name)) {
 		// init Multi-Level Queue with Feedback
+		if (!(sched = new(Mlqf_scheduler))) {
+			perror("Could not init MLQF scheduler");
+			abort();
+		}
 	} else {
-		perror( "Scheduler not recognized" );
+		perror("Scheduler not recognized");
 		abort();
 	}
 
@@ -152,6 +158,7 @@ void *scheduler_run(void *arg) {
 			} else {
 				len = sprintf(buffer, "HTTP/1.1 200 OK\n\n");
 				write( request->fd, buffer, len );
+				// set rcb to started
 			}
 
 			sched->serve(request);
@@ -161,6 +168,30 @@ void *scheduler_run(void *arg) {
 	return arg;
 }
 
+static void scheduler_serve(struct rcb *request)
+{
+	if (!request)
+		return;
+
+	int len = fread(buffer, 1, MAX_HTTP_SIZE, request->file);
+	if ( len < 0 ) {
+		perror( "Error while reading file" );
+		fflush(stderr);
+		delete(request);
+		return;
+	}
+
+	request->snt_bytes += len;
+	if (len > 0)
+		len = write( request->fd, buffer, len );
+
+	if ( len < 0 ) {
+		perror( "Error while writing to client" );
+		fflush(stderr);
+		delete(request);
+		return;
+	}
+}
 
 static void *new( const void *this, ... ) {
 	const struct interface *interface = this;
@@ -186,7 +217,9 @@ static void delete( void *this ) {
 
 	if ( this && *interface && (*interface)->delete )
 		this = (*interface)->delete(this);
+
 	free(this);
+	this = NULL;
 }
 
 
@@ -207,7 +240,7 @@ static void *rcb_new( void *_this, va_list *args ) {
 	this->file = fopen(this->request, "rb");  //**** rb?
 
 	this->snt_bytes = 0;
-	this->status = RCB_INIT;
+	this->status = RCB_8K;
 	this->next = NULL;
 
 	return this;
@@ -233,6 +266,7 @@ const void *Rcb = &_rcb;
 /*****************************************************************************
  *			SJF Scheduler static methods & Implementation
  ****************************************************************************/
+
 
 static int sjf_compare( const struct rcb *rcb1, const struct rcb *rcb2 ) {
 	if ( rcb1->tot_bytes < rcb2->tot_bytes )
@@ -312,28 +346,14 @@ static struct rcb *sjf_remove( void ) {
 
 static void sjf_serve( struct rcb *request ) {
 	do {
-		int len = fread(buffer, 1, MAX_HTTP_SIZE, request->file);
-		if ( len < 0 ) {
-			perror( "Error while reading file" );
-			goto stop_sjf_serve;
-		}
+		scheduler_serve(request);
+	} while (request && request->snt_bytes < request->tot_bytes);
 
-		request->snt_bytes += len;
-		if (len > 0)
-			len = write( request->fd, buffer, len );
-
-		if ( len < 0 ) {
-			perror( "Error while writing to client" );
-			goto stop_sjf_serve;
-		}
-	} while (request->snt_bytes < request->tot_bytes);
-
-	printf("Request <%lld> completed\n", request->seq_num);
-
-stop_sjf_serve:
-	fflush(stdout);
-	fflush(stderr);
-	delete(request);
+	if (request) {
+		printf("Request <%lld> completed\n", request->seq_num);
+		fflush(stdout);
+		delete(request);
+	}
 }
 
 static void *sjf_new( void *_this, va_list *args ) {
@@ -377,67 +397,58 @@ const void *Sjf_scheduler = &_sjf_scheduler;
 
 
 /*****************************************************************************
- *           TODO RR Scheduler static methods & Implementation
- *
- * need to implement rr_new, rr_delete, and setup the dynamic
- * dispatch methods
- ****************************************************************************/
+ *           RR Scheduler static methods & Implementation
+ *****************************************************************************/
+
+static void linkedlist_insert(struct rcb *request, struct rcb *ll[])
+{
+	if (!ll[1]) {
+			ll[0] = ll[1] = request;
+		} else {
+			ll[1]->next = request;
+			ll[1] = ll[1]->next;
+		}
+
+		sched->rcb_count++;
+}
+
+static struct rcb* linkedlist_remove(struct rcb* list[])
+{
+	struct rcb *request = list[0];
+		if (request == list[1]) {
+			list[0] = list[1] = NULL;
+		} else {
+			list[0] = request->next;
+		}
+		sched->rcb_count--;
+		request->next = NULL;
+
+		return request;
+}
 
 static void rr_insert(struct rcb *request)
 {
-	if (!sched->rcbs[1]) {
-		sched->rcbs[0] = sched->rcbs[1] = request;
-	} else {
-		sched->rcbs[1]->next = request;
-		sched->rcbs[1] = sched->rcbs[1]->next;
-	}
-
-	sched->rcb_count++;
+	linkedlist_insert(request, &sched->rcbs[0]);
 }
 
 static struct rcb *rr_remove(void)
 {
-	struct rcb *request = sched->rcbs[0];
-	if (request == sched->rcbs[1]) {
-		sched->rcbs[0] = sched->rcbs[1] = NULL;
-	} else {
-		sched->rcbs[0] = request->next;
-	}
-	sched->rcb_count--;
-	request->next = NULL;
-
-	return request;
+	return linkedlist_remove(&sched->rcbs[0]);
 }
 
 static void rr_serve(struct rcb *request)
 {
-	int len = fread(buffer, 1, MAX_HTTP_SIZE, request->file);
-	if ( len < 0 ) {
-		perror( "Error while reading file" );
-		fflush(stderr);
-		delete(request);
-		return;
+	scheduler_serve(request);
+
+	if (request) {
+		if (request->snt_bytes < request->tot_bytes) {
+			sched->insert(request);
+		} else {
+			printf("Request <%lld> completed\n", request->seq_num);
+			delete(request);
+		}
+		fflush(stdout);
 	}
-
-	request->snt_bytes += len;
-	if (len > 0)
-		len = write( request->fd, buffer, len );
-
-	if ( len < 0 ) {
-		perror( "Error while writing to client" );
-		fflush(stderr);
-		delete(request);
-		return;
-	}
-
-	if (request->snt_bytes < request->tot_bytes) {
-		sched->insert(request);
-	} else {
-		printf("Request <%lld> completed\n", request->seq_num);
-		delete(request);
-	}
-
-	fflush(stdout);
 }
 
 void *rr_new(void *_this, va_list *args)
@@ -482,8 +493,130 @@ static const struct interface _Rr_scheduler = {
 const void *Rr_scheduler = &_Rr_scheduler;
 
 /*****************************************************************************
- *		TODO MLQF Scheduler static methods & Implementation
- *
- * need to implement mlqf_compare, mlqf_new, mlqf_delete, and setup the dynamic
- * dispatch methods
+ *				MLQF Scheduler static methods & Implementation
  ****************************************************************************/
+static void mlqf_insert(struct rcb *request)
+{
+// 8kb
+	if ( request->status == RCB_8K){
+		linkedlist_insert(request, &sched->rcbs[0]);
+	}
+	else if(request->status == RCB_64K ){
+		linkedlist_insert(request, &sched->rcbs[2]);
+
+	}
+	else if(request->status == RCB_RR ) {
+		linkedlist_insert(request, &sched->rcbs[4]);
+	}
+}
+
+static struct rcb *mlqf_remove(void)
+{
+// check 8k
+	if (sched->rcbs[0]){
+		return linkedlist_remove(&sched->rcbs[0]);
+	}
+	else if (sched->rcbs[2]){
+		return linkedlist_remove(&sched->rcbs[2]);
+	}
+	else if (sched->rcbs[4]){
+		return linkedlist_remove(&sched->rcbs[4]);
+	}
+	return NULL;
+}
+
+static void mlqf_serve(struct rcb *request)
+{
+	if (request->status == RCB_8K) {
+
+		scheduler_serve(request);
+
+		if (!request)
+			return;
+
+		if (request->snt_bytes < request->tot_bytes) {
+			request->status++;
+			sched->insert(request);
+		}
+		else {
+			delete(request);
+			fflush(stdout);
+		}
+
+		return;
+	}
+	if (request->status == RCB_64K) {
+		for (int i = 0; i < 8; i++) {
+			scheduler_serve(request);
+		}
+
+		if (!request)
+			return;
+
+		if (request->snt_bytes < request->tot_bytes) {
+			request->status++;
+			sched->insert(request);
+		}
+		else {
+			delete(request);
+			fflush(stdout);
+		}
+		return;
+	}
+	if (request->status == RCB_RR) {
+		for (int i = 0; i < 8; i++) {
+			scheduler_serve(request);
+		}
+
+		if (!request)
+			return;
+
+		if (request->snt_bytes < request->tot_bytes) {
+			sched->insert(request);
+		}
+		else {
+			delete(request);
+			fflush(stdout);
+		}
+	}
+}
+
+void *mlqf_new(void *_this, va_list *args)
+{
+	struct scheduler *this = _this;
+
+	this->insert = mlqf_insert;
+	this->remove = mlqf_remove;
+	this->serve = mlqf_serve;
+
+	this->rcbs = calloc(6, sizeof *this->rcbs);
+	this->quantum = MAX_HTTP_SIZE;
+
+	return this;
+}
+
+void *mlqf_delete(void *_this)
+{
+	struct scheduler *this = _this;
+
+	if (this->rcbs[0]) {
+		struct rcb *request;
+		while (this->rcbs[0]) {
+			request = this->rcbs[0]->next;
+			delete(this->rcbs[0]);
+			this->rcbs[0] = request;
+		}
+	}
+
+	free(this->rcbs);
+
+	return this;
+}
+
+static const struct interface _Mlqf_scheduler = {
+	sizeof (struct scheduler),
+	mlqf_new,
+	mlqf_delete,
+};
+
+const void *Mlqf_scheduler = &_Mlqf_scheduler;

@@ -11,12 +11,11 @@ enum {
 };
 
 /* used for rcb.status */
-enum {
-	RCB_INIT,
-	RCB_WAIT,
-	RCB_BUSY,
-	RCB_DONE,
-};
+typedef enum {
+	RCB_8K,
+	RCB_64K,
+	RCB_RR,
+}  queue_level;
 
 /**
  * structure used to dynamically dispatch scheduler and rcb methods for
@@ -40,7 +39,7 @@ struct rcb {
 	FILE *file;
 	long long snt_bytes;
 	long long tot_bytes;
-	int status;
+	queue_level status;
 };
 
 /**
@@ -62,6 +61,7 @@ struct scheduler {
 extern const void *Rcb;
 extern const void *Sjf_scheduler;
 extern const void *Rr_scheduler;
+extern const void *Mlqf_scheduler;
 
 /**
  * Picks a scheduler on startup to manage the threadpool.

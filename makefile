@@ -6,7 +6,7 @@ ADD_OBJS = scheduler.o
 
 # compilers, linkers, utilities, and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic
+CFLAGS = -Wall -Wextra -pedantic -std=c99 -g
 COMPILE = $(CC) $(CFLAGS)
 LINK = $(CC) $(CFLAGS) -o $@
 
@@ -26,6 +26,8 @@ lib: sws_gold.o
 
 clean:
 	rm -f *.o $(PROGRAM)
+
+rebuild: clean all
 
 zip:
 	rm -f sws.zip
